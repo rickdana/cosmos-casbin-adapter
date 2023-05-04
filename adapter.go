@@ -1,17 +1,26 @@
 package cosmosadapter
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/data/azcosmos"
+	"net/http"
 	"strings"
 
 	"context"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/casbin/casbin/v2/model"
 	"github.com/casbin/casbin/v2/persist"
 	"github.com/mmcloughlin/meow"
-	"github.com/spacycoder/cosmosdb-go-sdk/cosmos"
 )
+
+type Data struct {
+	Documents interface{} `json:"Documents,omitempty"`
+	Count     int         `json:"_count,omitempty"`
+}
 
 // CasbinRule represents a rule in Casbin.
 type CasbinRule struct {
@@ -27,95 +36,125 @@ type CasbinRule struct {
 
 // adapter represents the CosmosDB adapter for policy storage.
 type adapter struct {
-	collectionName string
-	databaseName   string
-	collection     *cosmos.Collection
-	db             *cosmos.Database
-	client         *cosmos.Client
-	filtered       bool
+	containerName   string
+	databaseName    string
+	containerClient *azcosmos.ContainerClient
+	db              *azcosmos.DatabaseClient
+	client          *azcosmos.Client
+	filtered        bool
 }
 
-// NewAdapter is the constructor for Adapter.
-// if no options are given the database name is "casbin" and the collection is named casbin_rule
-// if the database or collection is not found it is automatically created.
-// the database can be changed by using the Database(db string) option.
-// the collection can be changed by using the Collection(coll string) option.
-// see README for example
-func NewAdapter(connectionString string, options ...Option) persist.Adapter {
-	client, err := cosmos.New(connectionString)
+func NewAdapterFromConnectionSting(connectionString string, options Options) persist.Adapter {
+	client, err := azcosmos.NewClientFromConnectionString(connectionString, &options.ClientOptions)
 	if err != nil {
 		panic(fmt.Sprintf("Creating new cosmos client caused error: %s", err.Error()))
 	}
-	// create adapter and set default values
-	a := &adapter{collectionName: "casbin_rule", databaseName: "casbin", client: client}
+	return NewAdapterFromClient(client, options)
+}
 
-	// apply options
-	for _, option := range options {
-		option(a)
+// NewAdapter is the constructor for Adapter.
+// if no options are given the database name is "casbin" and the containerClient is named casbin_rule
+// if the database or containerClient is not found it is automatically created.
+// the database can be changed by using the Database(db string) option.
+// the containerClient can be changed by using the Collection(coll string) option.
+// see README for example
+func NewAdapter(endpoint string, cred *azidentity.DefaultAzureCredential, options Options) persist.Adapter {
+
+	client, err := azcosmos.NewClient(endpoint, cred, &options.ClientOptions)
+	if err != nil {
+		panic(fmt.Sprintf("Creating new cosmos client caused error: %s", err.Error()))
+	}
+	return NewAdapterFromClient(client, options)
+}
+
+func NewAdapterFromClient(client *azcosmos.Client, options Options) persist.Adapter {
+	// create adapter and set default values
+	a := &adapter{
+		containerName: options.containerName,
+		databaseName:  options.databaseName,
+		client:        client,
 	}
 
-	db := a.client.Database(a.databaseName)
-	a.createDatabaseIfNotExist(db)
-	a.db = db
+	database, err := a.client.NewDatabase(options.databaseName)
+	if err != nil {
+		panic(fmt.Sprintf("Creating new database with id %s caused error: %s", options.databaseName, err.Error()))
+	}
 
-	collection := db.Collection(a.collectionName)
-	a.createCollectionIfNotExist(collection)
-	a.collection = collection
+	container, err := a.client.NewContainer(database.ID(), options.containerName)
+	if err != nil {
+		panic(fmt.Sprintf("Creating container with name %s caused error: %s", options.containerName, err.Error()))
+	}
+	a.db = database
+	a.containerClient = container
+	a.databaseName = options.databaseName
+
+	a.createDatabaseIfNotExist()
+	a.createCollectionIfNotExist()
 	a.filtered = false
 	return a
 }
 
-func (a *adapter) createDatabaseIfNotExist(db *cosmos.Database) {
-	_, err := db.Read(context.Background())
+func (a *adapter) createDatabaseIfNotExist() {
+	ctx := context.Background()
+	_, err := a.db.Read(ctx, nil)
 	if err != nil {
-		if err, ok := err.(*cosmos.Error); ok {
-			if err.NotFound() {
-				_, createDbErr := a.client.Databases().Create(context.Background(), a.databaseName)
-				if createDbErr != nil {
-					panic(fmt.Sprintf("Creating cosmos database caused error: %s", createDbErr.Error()))
-				}
-			} else {
-				panic(fmt.Sprintf("Reading cosmos database caused error: %s", err.Error()))
+		resErr := err.(*azcore.ResponseError)
+		if resErr.StatusCode == http.StatusNotFound {
+			dbProps := azcosmos.DatabaseProperties{ID: a.databaseName}
+			_, createDbErr := a.client.CreateDatabase(ctx, dbProps, nil)
+			if createDbErr != nil {
+				panic(fmt.Sprintf("Creating cosmos database caused error: %s", createDbErr.Error()))
 			}
 		} else {
 			panic(fmt.Sprintf("Reading cosmos database caused error: %s", err.Error()))
 		}
 	}
+
 }
 
-func (a *adapter) createCollectionIfNotExist(collection *cosmos.Collection) {
-	_, err := collection.Read(context.Background())
+func (a *adapter) createCollectionIfNotExist() {
+	ctx := context.Background()
+	_, err := a.containerClient.Read(ctx, nil)
+
 	if err != nil {
-		if err, ok := err.(*cosmos.Error); ok {
-			if err.NotFound() {
-				collDef := &cosmos.CollectionDefinition{Resource: cosmos.Resource{ID: a.collectionName}, PartitionKey: cosmos.PartitionKeyDefinition{Paths: []string{"/pType"}, Kind: "Hash"}}
-				_, err := a.db.Collections().Create(context.Background(), collDef)
-				if err != nil {
-					panic(fmt.Sprintf("Creating cosmos collection caused error: %s", err.Error()))
-				}
-			} else {
-				panic(fmt.Sprintf("Reading cosmos collection caused error: %s", err.Error()))
+		resErr := err.(*azcore.ResponseError)
+		if resErr.StatusCode == http.StatusNotFound {
+			properties := azcosmos.ContainerProperties{
+				ID: a.containerName,
+				PartitionKeyDefinition: azcosmos.PartitionKeyDefinition{
+					Paths: []string{"/pType"},
+				},
+			}
+			_, err := a.db.CreateContainer(ctx, properties, nil)
+			if err != nil {
+				panic(fmt.Sprintf("Creating cosmos containerClient caused error: %s", err.Error()))
 			}
 		} else {
-			panic(fmt.Sprintf("Reading cosmos collection caused error: %s", err.Error()))
+			panic(fmt.Sprintf("Reading cosmos containerClient caused error: %s", err.Error()))
 		}
 	}
 }
 
-// NewFilteredAdapter is the constructor for FilteredAdapter.
-// Casbin will not automatically call LoadPolicy() for a filtered adapter.
-func NewFilteredAdapter(url string, options ...Option) persist.FilteredAdapter {
-	a := NewAdapter(url, options...).(*adapter)
-	a.filtered = true
-	return a
-}
+//// NewFilteredAdapter is the constructor for FilteredAdapter.
+//// Casbin will not automatically call LoadPolicy() for a filtered adapter.
+//func NewFilteredAdapter(url string, options ...Option) persist.FilteredAdapter {
+//	a := NewAdapter(url, options...).(*adapter)
+//	a.filtered = true
+//	return a
+//}
 
 func (a *adapter) dropCollection() error {
-	_, err := a.collection.Delete(context.Background())
+	_, err := a.containerClient.Delete(context.Background(), nil)
 	if err != nil {
 		return err
 	}
-	_, err = a.db.Collections().Create(context.Background(), &cosmos.CollectionDefinition{Resource: cosmos.Resource{ID: a.collectionName}, PartitionKey: cosmos.PartitionKeyDefinition{Paths: []string{"/pType"}, Kind: "Hash"}})
+	properties := azcosmos.ContainerProperties{
+		ID: a.containerName,
+		PartitionKeyDefinition: azcosmos.PartitionKeyDefinition{
+			Paths: []string{"/pType"},
+		},
+	}
+	_, err = a.db.CreateContainer(context.Background(), properties, nil)
 	return err
 }
 
@@ -166,22 +205,26 @@ LineEnd:
 
 // LoadPolicy loads policy from database.
 func (a *adapter) LoadPolicy(model model.Model) error {
-	lines := []CasbinRule{}
+	ctx := context.Background()
+	var lines []CasbinRule
 	a.filtered = false
-	res, err := a.collection.Documents().ReadAll(context.Background(), &lines, cosmos.CrossPartition())
-	if err != nil {
-		return err
-	}
+	loadPolicyQuery := "SELECT * FROM c"
 
-	tokenString := res.Continuation()
-	for tokenString != "" {
-		newLines := []CasbinRule{}
-		res, err := a.collection.Documents().ReadAll(context.Background(), &newLines, cosmos.CrossPartition(), cosmos.Continuation(tokenString))
+	queryPager := a.containerClient.NewQueryItemsPager(loadPolicyQuery, azcosmos.NewPartitionKeyString("p"), nil)
+
+	for queryPager.More() {
+		res, err := queryPager.NextPage(ctx)
 		if err != nil {
 			return err
 		}
-		tokenString = res.Continuation()
-		lines = append(lines, newLines...)
+		for _, item := range res.Items {
+			var line CasbinRule
+			err := json.Unmarshal(item, &line)
+			if err != nil {
+				return err
+			}
+			lines = append(lines, line)
+		}
 	}
 
 	for _, line := range lines {
@@ -193,23 +236,28 @@ func (a *adapter) LoadPolicy(model model.Model) error {
 // LoadFilteredPolicy loads matching policy lines from database. If not nil,
 // the filter must be a valid MongoDB selector.
 func (a *adapter) LoadFilteredPolicy(model model.Model, filter interface{}) error {
-	lines := []CasbinRule{}
-	querySpec := filter.(cosmos.SqlQuerySpec)
+	var lines []CasbinRule
+	querySpec := filter.(SqlQuerySpec)
 	a.filtered = true
-	res, err := a.collection.Documents().Query(context.Background(), &querySpec, &lines, cosmos.CrossPartition())
-	if err != nil {
-		return err
-	}
 
-	tokenString := res.Continuation()
-	for tokenString != "" {
-		newLines := []CasbinRule{}
-		res, err := a.collection.Documents().Query(context.Background(), &querySpec, &newLines, cosmos.CrossPartition(), cosmos.Continuation(tokenString))
+	queryOptions := &azcosmos.QueryOptions{
+		QueryParameters: querySpec.Parameters,
+	}
+	queryPager := a.containerClient.NewQueryItemsPager(querySpec.Query, azcosmos.NewPartitionKeyString("p"), queryOptions)
+
+	for queryPager.More() {
+		res, err := queryPager.NextPage(context.Background())
 		if err != nil {
 			return err
 		}
-		tokenString = res.Continuation()
-		lines = append(lines, newLines...)
+		for _, item := range res.Items {
+			var line CasbinRule
+			err := json.Unmarshal(item, &line)
+			if err != nil {
+				return err
+			}
+			lines = append(lines, line)
+		}
 	}
 
 	for _, line := range lines {
@@ -259,6 +307,8 @@ func savePolicyLine(ptype string, rule []string) CasbinRule {
 
 // SavePolicy saves policy to database.
 func (a *adapter) SavePolicy(model model.Model) error {
+	ctx := context.Background()
+
 	if a.filtered {
 		return errors.New("cannot save a filtered policy")
 	}
@@ -283,8 +333,7 @@ func (a *adapter) SavePolicy(model model.Model) error {
 	}
 
 	for _, line := range lines {
-		_, err := a.collection.Documents().Create(context.Background(), &line, cosmos.PartitionKey(line.PType))
-		if err != nil {
+		if err := a.save(ctx, line); err != nil {
 			return err
 		}
 	}
@@ -293,20 +342,46 @@ func (a *adapter) SavePolicy(model model.Model) error {
 
 // AddPolicy adds a policy rule to the storage.
 func (a *adapter) AddPolicy(sec string, ptype string, rule []string) error {
+	ctx := context.Background()
+
 	policy := savePolicyLine(ptype, rule)
-	_, err := a.collection.Documents().Create(context.Background(), &policy, cosmos.PartitionKey(policy.PType))
+	return a.save(ctx, policy)
+}
+
+func (a *adapter) save(ctx context.Context, policy CasbinRule) error {
+	marshalled, err := json.Marshal(policy)
+
+	if err != nil {
+		return err
+	}
+
+	res, err := a.containerClient.CreateItem(ctx, azcosmos.NewPartitionKeyString(policy.PType), marshalled, nil)
+	if err != nil {
+		return err
+	}
+
+	if statusCode := res.RawResponse.StatusCode; statusCode != http.StatusCreated {
+		return errors.New(fmt.Sprintf("Unable to save policy: unexpected status code %d", statusCode))
+	}
 	return err
 }
 
 // RemovePolicy removes a policy rule from the storage.
 func (a *adapter) RemovePolicy(sec string, ptype string, rule []string) error {
+	ctx := context.Background()
+
 	policy := savePolicyLine(ptype, rule)
-	_, err := a.collection.Document(policy.ID).Delete(context.Background(), cosmos.PartitionKey(policy.PType))
+	_, err := a.containerClient.DeleteItem(ctx, azcosmos.NewPartitionKeyString(policy.PType), policy.ID, nil)
+	if err != nil {
+		return err
+	}
 	return err
 }
 
 // RemoveFilteredPolicy removes policy rules that match the filter from the storage.
 func (a *adapter) RemoveFilteredPolicy(sec string, ptype string, fieldIndex int, fieldValues ...string) error {
+	ctx := context.Background()
+
 	selector := make(map[string]interface{})
 
 	if fieldIndex <= 0 && 0 < fieldIndex+len(fieldValues) {
@@ -341,21 +416,30 @@ func (a *adapter) RemoveFilteredPolicy(sec string, ptype string, fieldIndex int,
 	}
 
 	query := "SELECT * FROM root WHERE root.pType = @pType"
-	parameters := []cosmos.QueryParam{{Name: "@pType", Value: ptype}}
+	parameters := []azcosmos.QueryParameter{{Name: "@pType", Value: ptype}}
 	for key, value := range selector {
 		query += " AND root." + key + " = @" + key
-		parameters = append(parameters, cosmos.QueryParam{Name: "@" + key, Value: value})
+		parameters = append(parameters, azcosmos.QueryParameter{Name: "@" + key, Value: value})
 	}
 
-	querySpec := cosmos.SqlQuerySpec{Parameters: parameters, Query: query}
 	var policies []CasbinRule
-	_, err := a.collection.Documents().Query(context.Background(), &querySpec, &policies, cosmos.PartitionKey(ptype))
-	if err != nil {
-		return err
+	queryPager := a.containerClient.NewQueryItemsPager(query, azcosmos.NewPartitionKeyString(ptype), &azcosmos.QueryOptions{QueryParameters: parameters})
+	for queryPager.More() {
+		res, err := queryPager.NextPage(ctx)
+		if err != nil {
+			return err
+		}
+		for _, item := range res.Items {
+			var policy CasbinRule
+			if err := json.Unmarshal(item, &policy); err != nil {
+				return err
+			}
+			policies = append(policies, policy)
+		}
 	}
 
 	for _, policy := range policies {
-		_, err := a.collection.Document(policy.ID).Delete(context.Background(), cosmos.PartitionKey(policy.PType))
+		_, err := a.containerClient.DeleteItem(ctx, azcosmos.NewPartitionKeyString(policy.PType), policy.ID, nil)
 		if err != nil {
 			return err
 		}
@@ -364,22 +448,8 @@ func (a *adapter) RemoveFilteredPolicy(sec string, ptype string, fieldIndex int,
 	return nil
 }
 
-type Option func(*adapter)
-
-func Database(db string) Option {
-	return func(a *adapter) {
-		a.databaseName = db
-	}
-}
-
-func Collection(coll string) Option {
-	return func(a *adapter) {
-		a.collectionName = coll
-	}
-}
-
-func CosmosClient(client *cosmos.Client) Option {
-	return func(a *adapter) {
-		a.client = client
-	}
+type Options struct {
+	azcosmos.ClientOptions
+	databaseName  string
+	containerName string
 }

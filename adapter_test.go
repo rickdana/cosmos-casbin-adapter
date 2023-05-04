@@ -15,16 +15,19 @@
 package cosmosadapter
 
 import (
-	"os"
-	"testing"
-
-	"github.com/spacycoder/cosmosdb-go-sdk/cosmos"
-
+	"github.com/Azure/azure-sdk-for-go/sdk/data/azcosmos"
 	"github.com/casbin/casbin/v2"
 	"github.com/casbin/casbin/v2/util"
+	"github.com/stretchr/testify/assert"
+	"os"
+	"testing"
 )
 
 var testConnString = os.Getenv("TEST_COSMOS_URL")
+var options = Options{
+	databaseName:  "casbin",
+	containerName: "casbin_rule",
+}
 
 func getConnString() string {
 	return testConnString
@@ -45,14 +48,12 @@ func initPolicy(t *testing.T, db, coll string) {
 	if err != nil {
 		panic(err)
 	}
-	options := []Option{}
-	if db != "" {
-		options = append(options, Database(db))
+	options := Options{
+		databaseName:  db,
+		containerName: coll,
 	}
-	if coll != "" {
-		options = append(options, Collection(coll))
-	}
-	a := NewAdapter(getConnString(), options...)
+
+	a := NewAdapterFromConnectionSting(getConnString(), options)
 	// This is a trick to save the current policy to the DB.
 	// We can't call e.SavePolicy() because the adapter in the enforcer is still the file adapter.
 	// The current policy means the policy in the Casbin enforcer (aka in memory).
@@ -70,23 +71,28 @@ func initPolicy(t *testing.T, db, coll string) {
 	if err != nil {
 		panic(err)
 	}
+	assert.NoError(t, e.LoadPolicy())
+
 	testGetPolicy(t, e, [][]string{{"alice", "data1", "read"}, {"bob", "data2", "write"}, {"data2_admin", "data2", "read"}, {"data2_admin", "data2", "write"}})
 }
 
 func TestAdapter(t *testing.T) {
-	initPolicy(t, "casbin", "casbin_rule")
+
+	initPolicy(t, options.databaseName, options.containerName)
 	// Note: you don't need to look at the above code
 	// if you already have a working DB with policy inside.
 
 	// Now the DB has policy, so we can provide a normal use case.
 	// Create an adapter and an enforcer.
 	// NewEnforcer() will load the policy automatically.
-	a := NewAdapter(getConnString())
+	a := NewAdapterFromConnectionSting(getConnString(), options)
 	e, err := casbin.NewEnforcer("examples/rbac_model.conf", a)
+
 	if err != nil {
 		t.Fatalf("Expected NewEnforcer() to be successful; got %v", err)
 	}
 
+	assert.NoError(t, e.LoadPolicy())
 	testGetPolicy(t, e, [][]string{{"alice", "data1", "read"}, {"bob", "data2", "write"}, {"data2_admin", "data2", "read"}, {"data2_admin", "data2", "write"}})
 
 	// AutoSave is enabled by default.
@@ -149,7 +155,8 @@ func TestAdapter(t *testing.T) {
 }
 
 func TestDeleteFilteredAdapter(t *testing.T) {
-	a := NewAdapter(getConnString())
+
+	a := NewAdapterFromConnectionSting(getConnString(), options)
 	e, err := casbin.NewEnforcer("examples/rbac_tenant_service.conf", a)
 	if err != nil {
 		t.Fatalf("Expected NewEnforcer() to be successful; got %v", err)
@@ -183,7 +190,7 @@ func TestFilteredAdapter(t *testing.T) {
 	// Now the DB has policy, so we can provide a normal use case.
 	// Create an adapter and an enforcer.
 	// NewEnforcer() will load the policy automatically.
-	a := NewAdapter(getConnString())
+	a := NewAdapterFromConnectionSting(getConnString(), options)
 	e, err := casbin.NewEnforcer("examples/rbac_model.conf", a)
 	if err != nil {
 		t.Fatalf("Expected NewEnforcer() to be successful; got %v", err)
@@ -193,7 +200,7 @@ func TestFilteredAdapter(t *testing.T) {
 	e.AddPolicy("alice", "data1", "write")
 	e.AddPolicy("bob", "data2", "write")
 	// Reload the filtered policy from the storage.
-	filter := cosmos.SqlQuerySpec{Query: "SELECT * FROM root WHERE root.v0 = @v0", Parameters: []cosmos.QueryParam{{Name: "@v0", Value: "bob"}}}
+	filter := SqlQuerySpec{Query: "SELECT * FROM root WHERE root.v0 = @v0", Parameters: []azcosmos.QueryParameter{{Name: "@v0", Value: "bob"}}}
 	if err := e.LoadFilteredPolicy(filter); err != nil {
 		t.Errorf("Expected LoadFilteredPolicy() to be successful; got %v", err)
 	}
@@ -201,7 +208,7 @@ func TestFilteredAdapter(t *testing.T) {
 	testGetPolicy(t, e, [][]string{{"bob", "data2", "write"}})
 
 	// Verify that alice's policy remains intact in the database.
-	filter = cosmos.SqlQuerySpec{Query: "SELECT * FROM root WHERE root.v0 = @v0", Parameters: []cosmos.QueryParam{{Name: "@v0", Value: "alice"}}}
+	filter = SqlQuerySpec{Query: "SELECT * FROM root WHERE root.v0 = @v0", Parameters: []azcosmos.QueryParameter{{Name: "@v0", Value: "alice"}}}
 	if err := e.LoadFilteredPolicy(filter); err != nil {
 		t.Errorf("Expected LoadFilteredPolicy() to be successful; got %v", err)
 	}
@@ -230,7 +237,7 @@ func TestNewAdapterWithInvalidConnectionString(t *testing.T) {
 		}
 	}()
 
-	_ = NewAdapter("fwdawFGwea")
+	_ = NewAdapterFromConnectionSting("fwdawFGwea", options)
 }
 
 func TestAdapterWithOptions(t *testing.T) {
@@ -241,7 +248,8 @@ func TestAdapterWithOptions(t *testing.T) {
 	// Now the DB has policy, so we can provide a normal use case.
 	// Create an adapter and an enforcer.
 	// NewEnforcer() will load the policy automatically.
-	a := NewAdapter(getConnString(), Database("mycasbindb"), Collection("mycasbincollection"))
+	opt := Options{databaseName: "mycasbindb", containerName: "mycasbincollection"}
+	a := NewAdapterFromConnectionSting(getConnString(), opt)
 	e, err := casbin.NewEnforcer("examples/rbac_model.conf", a)
 	if err != nil {
 		t.Fatalf("Expected NewEnforcer() to be successful; got %v", err)
