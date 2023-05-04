@@ -1,4 +1,4 @@
-module github.com/spacycoder/cosmos-casbin-adapter
+module github.com/rickdana/cosmos-casbin-adapter
 
 go 1.14
 
