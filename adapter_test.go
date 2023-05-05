@@ -25,8 +25,8 @@ import (
 
 var testConnString = os.Getenv("TEST_COSMOS_URL")
 var options = Options{
-	databaseName:  "casbin",
-	containerName: "casbin_rule",
+	DatabaseName:  "casbin",
+	ContainerName: "casbin_rule",
 }
 
 func getConnString() string {
@@ -49,8 +49,8 @@ func initPolicy(t *testing.T, db, coll string) {
 		panic(err)
 	}
 	options := Options{
-		databaseName:  db,
-		containerName: coll,
+		DatabaseName:  db,
+		ContainerName: coll,
 	}
 
 	a := NewAdapterFromConnectionSting(getConnString(), options)
@@ -78,7 +78,7 @@ func initPolicy(t *testing.T, db, coll string) {
 
 func TestAdapter(t *testing.T) {
 
-	initPolicy(t, options.databaseName, options.containerName)
+	initPolicy(t, options.DatabaseName, options.ContainerName)
 	// Note: you don't need to look at the above code
 	// if you already have a working DB with policy inside.
 
@@ -248,7 +248,7 @@ func TestAdapterWithOptions(t *testing.T) {
 	// Now the DB has policy, so we can provide a normal use case.
 	// Create an adapter and an enforcer.
 	// NewEnforcer() will load the policy automatically.
-	opt := Options{databaseName: "mycasbindb", containerName: "mycasbincollection"}
+	opt := Options{DatabaseName: "mycasbindb", ContainerName: "mycasbincollection"}
 	a := NewAdapterFromConnectionSting(getConnString(), opt)
 	e, err := casbin.NewEnforcer("examples/rbac_model.conf", a)
 	if err != nil {

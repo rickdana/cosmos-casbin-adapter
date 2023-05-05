@@ -70,23 +70,23 @@ func NewAdapter(endpoint string, cred *azidentity.DefaultAzureCredential, option
 func NewAdapterFromClient(client *azcosmos.Client, options Options) persist.Adapter {
 	// create adapter and set default values
 	a := &adapter{
-		containerName: options.containerName,
-		databaseName:  options.databaseName,
+		containerName: options.ContainerName,
+		databaseName:  options.DatabaseName,
 		client:        client,
 	}
 
-	database, err := a.client.NewDatabase(options.databaseName)
+	database, err := a.client.NewDatabase(options.DatabaseName)
 	if err != nil {
-		panic(fmt.Sprintf("Creating new database with id %s caused error: %s", options.databaseName, err.Error()))
+		panic(fmt.Sprintf("Creating new database with id %s caused error: %s", options.DatabaseName, err.Error()))
 	}
 
-	container, err := a.client.NewContainer(database.ID(), options.containerName)
+	container, err := a.client.NewContainer(database.ID(), options.ContainerName)
 	if err != nil {
-		panic(fmt.Sprintf("Creating container with name %s caused error: %s", options.containerName, err.Error()))
+		panic(fmt.Sprintf("Creating container with name %s caused error: %s", options.ContainerName, err.Error()))
 	}
 	a.db = database
 	a.containerClient = container
-	a.databaseName = options.databaseName
+	a.databaseName = options.DatabaseName
 
 	a.createDatabaseIfNotExist()
 	a.createCollectionIfNotExist()
@@ -450,6 +450,6 @@ func (a *adapter) RemoveFilteredPolicy(sec string, ptype string, fieldIndex int,
 
 type Options struct {
 	azcosmos.ClientOptions
-	databaseName  string
-	containerName string
+	DatabaseName  string
+	ContainerName string
 }
